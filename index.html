@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mi puzzle</title>
+
+  <!-- Datos para que se pueda instalar como app -->
+  <meta name="theme-color" content="#ff9800">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" type="image/png" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Puzzle">
+
+  <style>
+    #mesa {
+      position: relative;
+      background: #f4f4f4;
+      outline: 1px solid #ccc;
+      display: none;
+    }
+    #marco {
+      position: absolute;
+      outline: 2px dashed #999;
+      background-repeat: no-repeat;
+    }
+    .pieza {
+      position: absolute;
+      pointer-events: none;
+      filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.8));
+    }
+    .forma {
+      width: 100%;
+      height: 100%;
+      pointer-events: auto;
+      cursor: grab;
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .pieza.arrastrando {
+      filter: drop-shadow(0 6px 8px rgba(0, 0, 0, 0.55));
+    }
+    .pieza.arrastrando .forma {
+      cursor: grabbing;
+    }
+    .pieza.fija .forma {
+      pointer-events: none;
+      cursor: default;
+    }
+    #niveles button {
+      padding: 8px 12px;
+      margin: 2px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    #niveles button:disabled {
+      cursor: not-allowed;
+      opacity: 0.5;
+    }
+    #niveles button.activo {
+      background: orange;
+      font-weight: bold;
+    }
+    #contador {
+      font-size: 16px;
+      color: #333;
+    }
+    #mensaje {
+      font-size: 20px;
+      font-weight: bold;
+      color: green;
+    }
+    #siguiente {
+      display: none;
+      padding: 8px 12px;
+      font-size: 16px;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <h1>Mi puzzle</h1>
+
+  <input type="file" id="selector" accept="image/*">
+  <br><br>
+  <div id="niveles"></div>
+  <p id="contador"></p>
+  <div id="mesa"></div>
+  <p id="mensaje"></p>
+  <button id="siguiente">Siguiente nivel</button>
+  <br><br>
+  <button id="reiniciar">Reiniciar progreso</button>
+
+  <script>
+    const selector = document.getElementById("selector");
+    const nivelesDiv = document.getElementById("niveles");
+    const contador = document.getElementById("contador");
+    const mesa = document.getElementById("mesa");
+    const mensaje = document.getElementById("mensaje");
+    const botonSiguiente = document.getElementById("siguiente");
+    const botonReiniciar = document.getElementById("reiniciar");
+
+    // Tamaño máximo, en píxeles, del lado más largo del tablero
+    const MAXIMO = 320;
+
+    // Lista de niveles, ordenados de menor a mayor cantidad de piezas.
+    // Cada nivel es un "diseño de corte": nombre, estilo, columnas y filas.
+    // Estilos posibles: "recto", "ondas" y "clasico".
+    const niveles = [
+      { nombre: "Tiras",       estilo: "recto",   columnas: 3, filas: 1 },
+      { nombre: "Cuadrícula",  estilo: "recto",   columnas: 2, filas: 2 },
+      { nombre: "Ondas",       estilo: "ondas",   columnas: 3, filas: 2 },
+      { nombre: "Ondas",       estilo: "ondas",   columnas: 3, filas: 3 },
+      { nombre: "Clásico",     estilo: "clasico", columnas: 4, filas: 3 },
+      { nombre: "Clásico",     estilo: "clasico", columnas: 4, filas: 4 },
+      { nombre: "Clásico",     estilo: "clasico", columnas: 5, filas: 4 },
+      { nombre: "Clásico",     estilo: "clasico", columnas: 5, filas: 5 }
+    ];
+
+    // Dirección de la foto elegida (al inicio, ninguna)
+    let url = null;
+
+    // Medidas reales de la foto elegida, en píxeles
+    let anchoFoto = 0;
+    let altoFoto = 0;
+
+    // Nivel que se está jugando
+    let nivelActual = 1;
+
+    // Nivel más alto que el usuario tiene desbloqueado
+    let desbloqueado = 1;
+
+    // Estado del nivel en juego
+    let terminado = false;
+    let totalPiezas = 0;
+    let colocadas = 0;
+    let distanciaIman = 0;   // a qué distancia una pieza "se imanta" a su lugar
+    let zArriba = 10;        // para que la pieza movida quede por encima de las demás
+
+    // Datos del arrastre en curso
+    let arrastrada = null;   // la pieza que se está moviendo (al inicio, ninguna)
+    let difX = 0;            // distancia entre el dedo y la esquina de la pieza (horizontal)
+    let difY = 0;            // lo mismo, en vertical
+
+    // ---------- Guardar y cargar el progreso ----------
+
+    function guardarProgreso() {
+      try {
+        localStorage.setItem("puzzleDesbloqueado", String(desbloqueado));
+      } catch (error) {
+        // Si el navegador no permite guardar, el juego sigue funcionando
+      }
+    }
+
+    function cargarProgreso() {
+      try {
+        const guardado = Number(localStorage.getItem("puzzleDesbloqueado"));
+        if (guardado >= 1 && guardado <= niveles.length) {
+          desbloqueado = guardado;
+        }
+      } catch (error) {
+        // Si no se puede leer, se empieza desde el nivel 1
+      }
+    }
+
+    // ---------- Botones de nivel ----------
+
+    function mostrarNiveles() {
+      nivelesDiv.innerHTML = "";
+
+      for (let i = 0; i < niveles.length; i++) {
+        const numeroNivel = i + 1;
+        const nivel = niveles[i];
+        const cantidad = nivel.columnas * nivel.filas;
+        const boton = document.createElement("button");
+        let texto = "Nivel " + numeroNivel + ": " + nivel.nombre + " (" + cantidad + " piezas)";
+
+        if (numeroNivel > desbloqueado) {
+          boton.disabled = true;
+          texto = "🔒 " + texto;
+        }
+        if (numeroNivel === nivelActual) {
+          boton.classList.add("activo");
+        }
+
+        boton.textContent = texto;
+        boton.addEventListener("click", function () {
+          nivelActual = numeroNivel;
+          mostrarNiveles();
+          crearPuzzle();
+        });
+        nivelesDiv.appendChild(boton);
+      }
+    }
+
+    // ---------- Formas de los bordes ----------
+
+    // Elige al azar hacia qué lado sale la lengüeta (1 o -1)
+    function signoAzar() {
+      return Math.random() < 0.5 ? 1 : -1;
+    }
+
+    // Crea la forma de un borde que va desde el punto (x0, y0) hasta (x1, y1).
+    // Devuelve una lista de puntos que describe una o varias curvas:
+    // primero el punto de inicio, y después grupos de 3 puntos por cada curva.
+    function crearBorde(x0, y0, x1, y1, signo, estilo, unidad) {
+      const dx = x1 - x0;
+      const dy = y1 - y0;
+      const largo = Math.sqrt(dx * dx + dy * dy);
+
+      // Dirección perpendicular al borde (hacia donde sale la lengüeta)
+      const nx = -dy / largo;
+      const ny = dx / largo;
+
+      // Lista de pares [avance a lo largo del borde, desvío hacia un costado]
+      let lista;
+
+      if (estilo === "clasico") {
+        const m = largo / 2;
+        const k = unidad;
+        lista = [
+          [0, 0],
+          [m - 0.20 * k, 0],          [m - 0.12 * k, 0.03 * k],  [m - 0.10 * k, 0.08 * k],
+          [m - 0.08 * k, 0.14 * k],   [m - 0.20 * k, 0.16 * k],  [m - 0.20 * k, 0.22 * k],
+          [m - 0.20 * k, 0.32 * k],   [m - 0.08 * k, 0.36 * k],  [m, 0.36 * k],
+          [m + 0.08 * k, 0.36 * k],   [m + 0.20 * k, 0.32 * k],  [m + 0.20 * k, 0.22 * k],
+          [m + 0.20 * k, 0.16 * k],   [m + 0.08 * k, 0.14 * k],  [m + 0.10 * k, 0.08 * k],
+          [m + 0.12 * k, 0.03 * k],   [m + 0.20 * k, 0],         [largo, 0]
+        ];
+      } else if (estilo === "ondas") {
+        const a = 0.28 * unidad;
+        lista = [
+          [0, 0],
+          [largo * 0.18, a],  [largo * 0.32, a],  [largo * 0.5, 0],
+          [largo * 0.68, -a], [largo * 0.82, -a], [largo, 0]
+        ];
+      } else {
+        // Borde recto
+        lista = [
+          [0, 0],
+          [largo / 3, 0], [largo * 2 / 3, 0], [largo, 0]
+        ];
+      }
+
+      // Convertir cada par en un punto real del tablero
+      const puntos = [];
+      for (let i = 0; i < lista.length; i++) {
+        const f = lista[i][0] / largo;
+        const u = lista[i][1] * signo;
+        puntos.push({
+          x: x0 + dx * f + nx * u,
+          y: y0 + dy * f + ny * u
+        });
+      }
+      return puntos;
+    }
+
+    // Escribe un punto como texto, restando el origen de la pieza
+    function coord(punto, ox, oy) {
+      return (punto.x - ox).toFixed(2) + " " + (punto.y - oy).toFixed(2);
+    }
+
+    // Escribe una lista de curvas como texto (formato de dibujo de curvas)
+    function trazo(puntos, ox, oy) {
+      let texto = "";
+      for (let i = 1; i < puntos.length; i += 3) {
+        texto += " C " + coord(puntos[i], ox, oy)
+               + " " + coord(puntos[i + 1], ox, oy)
+               + " " + coord(puntos[i + 2], ox, oy);
+      }
+      return texto;
+    }
+
+    // ---------- Progreso del nivel ----------
+
+    // Actualiza el texto del contador
+    function actualizarContador() {
+      if (totalPiezas === 0 || url === null) {
+        contador.textContent = "";
+        return;
+      }
+      contador.textContent = "Piezas colocadas: " + colocadas + " de " + totalPiezas;
+    }
+
+    // Se ejecuta cuando el usuario completa el nivel
+    function nivelCompletado() {
+      terminado = true;
+
+      if (nivelActual < niveles.length) {
+        // Desbloquear el siguiente nivel (si no lo estaba ya)
+        desbloqueado = Math.max(desbloqueado, nivelActual + 1);
+        guardarProgreso();
+        mostrarNiveles();
+        mensaje.textContent = "¡Completaste el nivel " + nivelActual + "! Ya podés pasar al nivel " + (nivelActual + 1) + ".";
+        botonSiguiente.style.display = "inline-block";
+      } else {
+        mensaje.textContent = "¡Felicitaciones, completaste todos los niveles!";
+      }
+    }
+
+    // ---------- Arrastrar y soltar ----------
+
+    // El usuario apoya el mouse o el dedo sobre una pieza
+    function alPresionar(evento, pieza, forma) {
+      if (terminado || arrastrada !== null) {
+        return;
+      }
+      evento.preventDefault();
+
+      const rect = mesa.getBoundingClientRect();
+      arrastrada = pieza;
+      difX = evento.clientX - rect.left - parseFloat(pieza.style.left);
+      difY = evento.clientY - rect.top - parseFloat(pieza.style.top);
+
+      // Poner la pieza por encima de todas las demás
+      zArriba = zArriba + 1;
+      pieza.style.zIndex = zArriba;
+      pieza.classList.add("arrastrando");
+
+      // Seguir recibiendo los movimientos aunque el mouse salga de la pieza
+      forma.setPointerCapture(evento.pointerId);
+    }
+
+    // El usuario mueve el mouse o el dedo
+    function alMover(evento) {
+      if (arrastrada === null) {
+        return;
+      }
+
+      const rect = mesa.getBoundingClientRect();
+      let x = evento.clientX - rect.left - difX;
+      let y = evento.clientY - rect.top - difY;
+
+      // No dejar que la pieza se salga de la mesa
+      x = Math.max(0, Math.min(x, mesa.clientWidth - arrastrada.offsetWidth));
+      y = Math.max(0, Math.min(y, mesa.clientHeight - arrastrada.offsetHeight));
+
+      arrastrada.style.left = x + "px";
+      arrastrada.style.top = y + "px";
+    }
+
+    // El usuario suelta el mouse o levanta el dedo
+    function alSoltar() {
+      if (arrastrada === null) {
+        return;
+      }
+
+      const pieza = arrastrada;
+      arrastrada = null;
+      pieza.classList.remove("arrastrando");
+
+      // ¿Qué tan lejos quedó de su lugar correcto?
+      const x = parseFloat(pieza.style.left);
+      const y = parseFloat(pieza.style.top);
+      const correctaX = Number(pieza.dataset.x);
+      const correctaY = Number(pieza.dataset.y);
+      const distX = x - correctaX;
+      const distY = y - correctaY;
+      const distancia = Math.sqrt(distX * distX + distY * distY);
+
+      // Si quedó cerca, se imanta y queda fija
+      if (distancia <= distanciaIman) {
+        pieza.style.left = correctaX + "px";
+        pieza.style.top = correctaY + "px";
+        pieza.style.zIndex = 1;
+        pieza.classList.add("fija");
+        colocadas = colocadas + 1;
+        actualizarContador();
+
+        if (colocadas === totalPiezas) {
+          nivelCompletado();
+        }
+      }
+    }
+
+    // El arrastre se cancela (por ejemplo, el celular lo interrumpe)
+    function alCancelar() {
+      if (arrastrada === null) {
+        return;
+      }
+      arrastrada.classList.remove("arrastrando");
+      arrastrada = null;
+    }
+
+    // ---------- Armado del puzzle ----------
+
+    // Arma el puzzle del nivel actual con la foto elegida
+    function crearPuzzle() {
+      mesa.innerHTML = "";
+      arrastrada = null;
+      terminado = false;
+      colocadas = 0;
+      zArriba = 10;
+      botonSiguiente.style.display = "none";
+
+      if (url === null) {
+        mesa.style.display = "none";
+        totalPiezas = 0;
+        mensaje.textContent = "Primero elegí una foto para empezar.";
+        actualizarContador();
+        return;
+      }
+      mesa.style.display = "block";
+      mensaje.textContent = "";
+
+      // Datos del diseño de corte del nivel actual
+      const nivel = niveles[nivelActual - 1];
+      const columnas = nivel.columnas;
+      const filas = nivel.filas;
+      totalPiezas = columnas * filas;
+
+      // El tablero toma la forma de la foto. Su lado más largo mide "maximo"
+      // (más chico si la pantalla es angosta, como en un celular).
+      const maximo = Math.max(150, Math.min(MAXIMO, window.innerWidth - 80));
+      const escala = maximo / Math.max(anchoFoto, altoFoto);
+      const anchoTablero = Math.max(columnas, Math.round(anchoFoto * escala));
+      const altoTablero = Math.max(filas, Math.round(altoFoto * escala));
+
+      // Tamaño de cada celda de la cuadrícula
+      const w = anchoTablero / columnas;
+      const h = altoTablero / filas;
+      const unidad = Math.min(w, h);
+
+      // Espacio extra alrededor de cada pieza para que entren las lengüetas
+      const margen = (nivel.estilo === "recto") ? 0 : Math.ceil(unidad * 0.4);
+
+      // Distancia a la que una pieza se imanta a su lugar
+      distanciaIman = Math.max(10, unidad * 0.3);
+
+      // Tamaño de la mesa: arriba el marco, abajo la zona donde se desparraman las piezas
+      const anchoMesa = anchoTablero + 2 * margen;
+      const altoMarco = altoTablero + 2 * margen;
+      const separacion = 20;
+      const altoMesa = altoMarco + separacion + altoMarco;
+      mesa.style.width = anchoMesa + "px";
+      mesa.style.height = altoMesa + "px";
+
+      // El marco punteado, con la foto muy tenue como guía
+      const marco = document.createElement("div");
+      marco.id = "marco";
+      marco.style.left = margen + "px";
+      marco.style.top = margen + "px";
+      marco.style.width = anchoTablero + "px";
+      marco.style.height = altoTablero + "px";
+      marco.style.backgroundImage = "linear-gradient(rgba(255, 255, 255, 0.82), rgba(255, 255, 255, 0.82)), url(" + url + ")";
+      marco.style.backgroundSize = "100% 100%";
+      mesa.appendChild(marco);
+
+      // 1. Crear la forma de todos los bordes (cada borde lo comparten dos piezas)
+      const horizontales = [];
+      for (let f = 0; f <= filas; f++) {
+        horizontales[f] = [];
+        for (let c = 0; c < columnas; c++) {
+          const estiloBorde = (f === 0 || f === filas) ? "recto" : nivel.estilo;
+          horizontales[f][c] = crearBorde(c * w, f * h, (c + 1) * w, f * h, signoAzar(), estiloBorde, unidad);
+        }
+      }
+      const verticales = [];
+      for (let f = 0; f < filas; f++) {
+        verticales[f] = [];
+        for (let c = 0; c <= columnas; c++) {
+          const estiloBorde = (c === 0 || c === columnas) ? "recto" : nivel.estilo;
+          verticales[f][c] = crearBorde(c * w, f * h, c * w, (f + 1) * h, signoAzar(), estiloBorde, unidad);
+        }
+      }
+
+      // 2. Crear cada pieza
+      const anchoPieza = w + 2 * margen;
+      const altoPieza = h + 2 * margen;
+
+      for (let fila = 0; fila < filas; fila++) {
+        for (let columna = 0; columna < columnas; columna++) {
+          const x0 = columna * w;
+          const y0 = fila * h;
+          const ox = x0 - margen;
+          const oy = y0 - margen;
+
+          // Los cuatro bordes de la pieza (abajo e izquierda se recorren al revés)
+          const arriba = horizontales[fila][columna];
+          const derecha = verticales[fila][columna + 1];
+          const abajo = horizontales[fila + 1][columna].slice().reverse();
+          const izquierda = verticales[fila][columna].slice().reverse();
+
+          // El contorno completo de la pieza, escrito como texto
+          const camino = "M " + coord(arriba[0], ox, oy)
+                       + trazo(arriba, ox, oy)
+                       + trazo(derecha, ox, oy)
+                       + trazo(abajo, ox, oy)
+                       + trazo(izquierda, ox, oy)
+                       + " Z";
+
+          // El contenedor de la pieza
+          const pieza = document.createElement("div");
+          pieza.className = "pieza";
+          pieza.style.width = anchoPieza + "px";
+          pieza.style.height = altoPieza + "px";
+          pieza.style.zIndex = 2;
+          pieza.dataset.x = x0;   // posición correcta en la mesa
+          pieza.dataset.y = y0;
+
+          // Posición inicial al azar, en la zona de abajo
+          pieza.style.left = (Math.random() * (anchoMesa - anchoPieza)) + "px";
+          pieza.style.top = (altoMarco + separacion + Math.random() * (altoMarco - altoPieza)) + "px";
+
+          // La parte visible de la pieza: la foto recortada con la forma
+          const forma = document.createElement("div");
+          forma.className = "forma";
+          forma.style.backgroundImage = "url(" + url + ")";
+          forma.style.backgroundRepeat = "no-repeat";
+          forma.style.backgroundSize = anchoTablero + "px " + altoTablero + "px";
+          forma.style.backgroundPosition = (margen - x0) + "px " + (margen - y0) + "px";
+          forma.style.clipPath = "path('" + camino + "')";
+
+          // Eventos de arrastre (funcionan con mouse y con dedo)
+          forma.addEventListener("pointerdown", function (evento) {
+            alPresionar(evento, pieza, forma);
+          });
+          forma.addEventListener("pointermove", alMover);
+          forma.addEventListener("pointerup", alSoltar);
+          forma.addEventListener("pointercancel", alCancelar);
+
+          pieza.appendChild(forma);
+          mesa.appendChild(pieza);
+        }
+      }
+
+      actualizarContador();
+    }
+
+    // ---------- Eventos ----------
+
+    // Cuando el usuario elige una foto
+    selector.addEventListener("change", function () {
+      const archivo = selector.files[0];
+      if (!archivo) {
+        return;
+      }
+
+      const direccion = URL.createObjectURL(archivo);
+      const imagen = new Image();
+
+      // Esperar a que la foto termine de cargar para conocer sus medidas
+      imagen.onload = function () {
+        anchoFoto = imagen.naturalWidth;
+        altoFoto = imagen.naturalHeight;
+        url = direccion;
+        crearPuzzle();
+      };
+      imagen.src = direccion;
+    });
+
+    // Botón "Siguiente nivel"
+    botonSiguiente.addEventListener("click", function () {
+      if (nivelActual < niveles.length) {
+        nivelActual = nivelActual + 1;
+        mostrarNiveles();
+        crearPuzzle();
+      }
+    });
+
+    // Botón "Reiniciar progreso"
+    botonReiniciar.addEventListener("click", function () {
+      if (confirm("¿Seguro que querés borrar tu progreso y volver al nivel 1?")) {
+        desbloqueado = 1;
+        nivelActual = 1;
+        guardarProgreso();
+        mostrarNiveles();
+        crearPuzzle();
+      }
+    });
+
+    // ---------- Inicio ----------
+
+    cargarProgreso();
+    mostrarNiveles();
+    crearPuzzle();
+  </script>
+
+  <!-- Registro del service worker (permite instalar la app y usarla sin conexión) -->
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", function () {
+        navigator.serviceWorker.register("sw.js").catch(function () {
+          // Si falla, el juego sigue funcionando igual, solo que sin modo sin conexión
+        });
+      });
+    }
+  </script>
+</body>
+</html>
